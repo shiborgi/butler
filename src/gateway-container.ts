@@ -27,7 +27,8 @@
  * it is resolved fresh on every spawn rather than cached — a gateway that was
  * recreated comes back at a different IP and the next session simply learns it.
  */
-import { execFileSync } from 'child_process';
+import { createHash } from 'crypto';
+import fs from 'fs';
 import path from 'path';
 
 import { egressNetworkName, ensureEgressNetwork } from './apple-container-network.js';
@@ -43,6 +44,37 @@ export const GATEWAY_PORT = 8080;
 
 /** The NAT network that gives the gateway — and only the gateway — a route out. */
 const UPSTREAM_NETWORK = 'default';
+const GATEWAY_REVISION_LABEL = 'nanoclaw-gateway-revision';
+
+/**
+ * Hash only the files copied by gateway/Dockerfile. Runtime policy and secrets
+ * live under gateway/config and are mounted read-only, so they must never be
+ * folded into an image identity (or read while calculating one).
+ */
+export function gatewaySourceRevision(projectRoot: string = process.cwd()): string {
+  const gatewayRoot = path.join(projectRoot, 'gateway');
+  const roots = ['Dockerfile', 'package.json', 'tsconfig.json', 'src'];
+  const files: string[] = [];
+  const visit = (relative: string): void => {
+    const absolute = path.join(gatewayRoot, relative);
+    const stat = fs.statSync(absolute);
+    if (stat.isDirectory()) {
+      for (const entry of fs.readdirSync(absolute).sort()) visit(path.join(relative, entry));
+      return;
+    }
+    if (stat.isFile()) files.push(relative);
+  };
+  for (const root of roots) visit(root);
+
+  const hash = createHash('sha256');
+  for (const relative of files.sort()) {
+    hash.update(relative);
+    hash.update('\0');
+    hash.update(fs.readFileSync(path.join(gatewayRoot, relative)));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
+}
 
 export class GatewayUnavailableError extends Error {
   constructor(message: string) {
@@ -52,39 +84,44 @@ export class GatewayUnavailableError extends Error {
 }
 
 export function gatewayImageTag(projectRoot?: string): string {
-  return `nanoclaw-gateway-v2-${getInstallSlug(projectRoot)}:latest`;
+  const revision = gatewaySourceRevision(projectRoot);
+  return `nanoclaw-gateway-v2-${getInstallSlug(projectRoot)}-${revision.slice(0, 12)}:latest`;
 }
 
 export function gatewayContainerName(projectRoot?: string): string {
   return validateRuntimeName(`nanoclaw-gateway-v2-${getInstallSlug(projectRoot)}`, 'container');
 }
 
-interface ContainerRecord {
+export interface GatewayContainerRecord {
   id?: string;
   configuration?: { id?: string; labels?: Record<string, string> };
   status?: { state?: string; networks?: Array<{ network?: string; ipv4Address?: string }> };
 }
 
-function parseRecords(output: string): ContainerRecord[] {
+function parseRecords(output: string): GatewayContainerRecord[] {
   const trimmed = output.trim();
   if (!trimmed) return [];
   try {
     const parsed: unknown = JSON.parse(trimmed);
-    return Array.isArray(parsed) ? (parsed as ContainerRecord[]) : [parsed as ContainerRecord];
+    return Array.isArray(parsed) ? (parsed as GatewayContainerRecord[]) : [parsed as GatewayContainerRecord];
   } catch {
     return [];
   }
 }
 
 /** The gateway's address on the host-only network, or null when it is not up there. */
-export function addressOnNetwork(records: readonly ContainerRecord[], name: string, network: string): string | null {
+export function addressOnNetwork(
+  records: readonly GatewayContainerRecord[],
+  name: string,
+  network: string,
+): string | null {
   const record = records.find((r) => (r.configuration?.id ?? r.id) === name);
   if (!record || record.status?.state !== 'running') return null;
   const leg = record.status?.networks?.find((n) => n.network === network);
   return leg?.ipv4Address?.split('/')[0] ?? null;
 }
 
-function listContainers(cli: Cli): ContainerRecord[] {
+function listContainers(cli: Cli): GatewayContainerRecord[] {
   try {
     return parseRecords(cli.run(['list', '--all', '--format', 'json'], { timeoutMs: 20_000 }));
   } catch (error) {
@@ -112,10 +149,7 @@ export function ensureGatewayImage(cli: Cli = realCli('container'), projectRoot:
   log.info('Building gateway image', { tag });
   try {
     // Long: a cold build pulls a base image and installs dependencies.
-    execFileSync('container', ['build', '-t', tag, path.join(projectRoot, 'gateway')], {
-      stdio: 'pipe',
-      timeout: 900_000,
-    });
+    cli.run(['build', '-t', tag, path.join(projectRoot, 'gateway')], { timeoutMs: 900_000 });
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new GatewayUnavailableError(`the gateway image could not be built: ${detail}`);
@@ -134,9 +168,20 @@ export function ensureGatewayImage(cli: Cli = realCli('container'), projectRoot:
 export function ensureGatewayRunning(cli: Cli = realCli('container'), projectRoot: string = process.cwd()): string {
   const name = gatewayContainerName(projectRoot);
   const egress = egressNetworkName(process.env, projectRoot);
+  const revision = gatewaySourceRevision(projectRoot);
+  const records = listContainers(cli);
+  const record = records.find((candidate) => (candidate.configuration?.id ?? candidate.id) === name);
 
-  const existing = addressOnNetwork(listContainers(cli), name, egress);
-  if (existing) return existing;
+  const existing = addressOnNetwork(records, name, egress);
+  if (existing && record?.configuration?.labels?.[GATEWAY_REVISION_LABEL] === revision) return existing;
+
+  if (existing) {
+    log.info('Replacing stale gateway container', {
+      container: name,
+      expectedRevision: revision.slice(0, 12),
+      actualRevision: record?.configuration?.labels?.[GATEWAY_REVISION_LABEL]?.slice(0, 12) ?? 'unversioned',
+    });
+  }
 
   // The network has to exist before anything can be attached to it, and on a
   // fresh machine nothing has created it yet: the session driver also ensures
@@ -179,6 +224,8 @@ export function ensureGatewayRunning(cli: Cli = realCli('container'), projectRoo
     `nanoclaw-install=${getInstallSlug(projectRoot)}`,
     '--label',
     'nanoclaw-role=gateway',
+    '--label',
+    `${GATEWAY_REVISION_LABEL}=${revision}`,
     '--cap-drop',
     'ALL',
     '--init',

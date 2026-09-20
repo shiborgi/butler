@@ -66,16 +66,48 @@ export function pauseTask(db: Database.Database, taskId: string): number {
 }
 
 export function resumeTask(db: Database.Database, taskId: string): number {
-  return db
-    .prepare(
-      "UPDATE messages_in SET status = 'pending' WHERE (id = ? OR series_id = ?) AND kind = 'task' AND status = 'paused'",
-    )
-    .run(taskId, taskId).changes;
+  return db.transaction(() => {
+    const rows = db
+      .prepare(
+        `SELECT id, COALESCE(series_id, id) AS series_id, seq
+           FROM messages_in
+          WHERE (id = ? OR series_id = ?) AND kind = 'task' AND status = 'paused'`,
+      )
+      .all(taskId, taskId) as Array<{ id: string; series_id: string; seq: number }>;
+    if (rows.length === 0) return 0;
+
+    const resumed = db
+      .prepare(
+        "UPDATE messages_in SET status = 'pending' WHERE (id = ? OR series_id = ?) AND kind = 'task' AND status = 'paused'",
+      )
+      .run(taskId, taskId).changes;
+    const reset = db.prepare(
+      `INSERT INTO task_failure_resets (series_id, from_seq, reset_at)
+       VALUES (?, ?, ?)
+       ON CONFLICT(series_id) DO UPDATE SET
+         from_seq = excluded.from_seq,
+         reset_at = excluded.reset_at`,
+    );
+    const resetAt = new Date().toISOString();
+    for (const row of rows) reset.run(row.series_id, row.seq, resetAt);
+    return resumed;
+  })();
 }
 
 export function deleteTask(db: Database.Database, taskId: string): number {
-  return db.prepare("DELETE FROM messages_in WHERE (id = ? OR series_id = ?) AND kind = 'task'").run(taskId, taskId)
-    .changes;
+  return db.transaction(() => {
+    const series = db
+      .prepare(
+        "SELECT DISTINCT COALESCE(series_id, id) AS series_id FROM messages_in WHERE (id = ? OR series_id = ?) AND kind = 'task'",
+      )
+      .all(taskId, taskId) as Array<{ series_id: string }>;
+    const changes = db
+      .prepare("DELETE FROM messages_in WHERE (id = ? OR series_id = ?) AND kind = 'task'")
+      .run(taskId, taskId).changes;
+    const clearReset = db.prepare('DELETE FROM task_failure_resets WHERE series_id = ?');
+    for (const row of series) clearReset.run(row.series_id);
+    return changes;
+  })();
 }
 
 export interface TaskUpdate {
@@ -165,13 +197,19 @@ export function getCompletedRecurring(db: Database.Database): RecurringMessage[]
  * reason should throttle, not spin.
  */
 export function trailingFailedRuns(db: Database.Database, seriesKey: string): number {
+  const boundary = db.prepare('SELECT from_seq FROM task_failure_resets WHERE series_id = ?').get(seriesKey) as
+    | { from_seq: number }
+    | undefined;
   const rows = db
     .prepare(
       `SELECT status FROM messages_in
-        WHERE (series_id = ? OR id = ?) AND kind = 'task' AND status IN ('completed', 'failed')
+        WHERE (series_id = ? OR id = ?)
+          AND kind = 'task'
+          AND status IN ('completed', 'failed')
+          AND seq >= ?
         ORDER BY seq DESC`,
     )
-    .all(seriesKey, seriesKey) as Array<{ status: string }>;
+    .all(seriesKey, seriesKey, boundary?.from_seq ?? 0) as Array<{ status: string }>;
   let streak = 0;
   for (const r of rows) {
     if (r.status !== 'failed') break;

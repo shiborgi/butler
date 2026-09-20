@@ -20,6 +20,16 @@ CREATE TABLE IF NOT EXISTS messages_in (
 );
 CREATE INDEX IF NOT EXISTS idx_messages_in_series ON messages_in(series_id);
 
+-- A manual resume starts a new failure-observation window without deleting
+-- the previous run history. from_seq is the paused occurrence being
+-- resumed: if it fails, that failure counts as the first one in the new
+-- window; older occurrences do not.
+CREATE TABLE IF NOT EXISTS task_failure_resets (
+  series_id  TEXT PRIMARY KEY,
+  from_seq   INTEGER NOT NULL,
+  reset_at   TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS delivered (
   message_out_id      TEXT PRIMARY KEY,
   platform_message_id TEXT,

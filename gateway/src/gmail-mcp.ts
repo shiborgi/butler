@@ -274,6 +274,12 @@ export async function handleGmailTool(
     if (toolName === 'list_history' && error instanceof GoogleApiError && error.status === 404) {
       return { historyExpired: true };
     }
+    // Gmail can delete a message after list_history returns it. Reporting a
+    // tombstone lets relay consumers advance safely instead of retrying that
+    // single id forever and blocking all later messages.
+    if (toolName === 'get_message' && error instanceof GoogleApiError && error.status === 404) {
+      return { id: str(args, 'messageId'), notFound: true };
+    }
     throw error;
   }
 }

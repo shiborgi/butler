@@ -52,7 +52,7 @@ import './modules/index.js';
 // accepts connections.
 import './cli/commands/index.js';
 import './cli/delivery-action.js';
-import { startCliServer, stopCliServer } from './cli/socket-server.js';
+import { markCliServerReady, startCliServer, stopCliServer } from './cli/socket-server.js';
 
 import type { ChannelAdapter, ChannelSetup } from './channels/adapter.js';
 import {
@@ -75,6 +75,12 @@ async function main(): Promise<void> {
   const db = await initDb(CENTRAL_DB_PATH, { role: 'host' });
   await runMigrations(db, undefined, { mode: 'auto' });
   log.info('Central DB ready', { dialect: db.dialect });
+
+  // Claim the install's socket before touching shared runtime objects. This
+  // is the atomic single-host guard: a duplicate process must fail here,
+  // before it can replace the gateway or race session adoption. Dispatch is
+  // gated until markCliServerReady() at the end of startup.
+  await startCliServer();
 
   // 1b. Backfill container_configs from legacy container.json files.
   // Idempotent — skips groups that already have a config row.
@@ -180,8 +186,8 @@ async function main(): Promise<void> {
   startHostSweep();
   log.info('Host sweep started');
 
-  // 8. Start the `ncl` CLI socket server (data/ncl.sock).
-  await startCliServer();
+  // 8. All dependencies are ready; CLI requests may now mutate host state.
+  markCliServerReady();
 
   log.info('NanoClaw running');
 }

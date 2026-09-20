@@ -16,6 +16,7 @@ import type { CallerContext, RequestFrame, ResponseFrame } from './frame.js';
 import { DEFAULT_SOCKET_PATH } from './socket-client.js';
 
 let server: net.Server | null = null;
+let serverReady = false;
 
 const PROBE_TIMEOUT_MS = 1000;
 
@@ -40,6 +41,7 @@ function probeLiveServer(socketPath: string): Promise<boolean> {
 }
 
 export async function startCliServer(socketPath: string = DEFAULT_SOCKET_PATH): Promise<void> {
+  serverReady = false;
   // Stale-socket cleanup — a previous run that crashed may have left the
   // file behind, and net.createServer refuses to bind to an existing path.
   // Only a socket nobody answers is stale: a live listener means another
@@ -79,10 +81,18 @@ export async function startCliServer(socketPath: string = DEFAULT_SOCKET_PATH): 
 }
 
 export async function stopCliServer(): Promise<void> {
+  serverReady = false;
   if (!server) return;
   const s = server;
   server = null;
   await new Promise<void>((resolve) => s.close(() => resolve()));
+}
+
+/** Open the dispatch gate after all host subsystems have started. The socket
+ * is intentionally bound earlier as the atomic single-host ownership claim. */
+export function markCliServerReady(): void {
+  if (!server) throw new Error('cannot mark ncl CLI ready before its server is listening');
+  serverReady = true;
 }
 
 function handleConnection(conn: net.Socket): void {
@@ -116,6 +126,15 @@ async function handleFrame(conn: net.Socket, line: string): Promise<void> {
         code: 'transport-error',
         message: `bad frame: ${e instanceof Error ? e.message : String(e)}`,
       },
+    });
+    return;
+  }
+
+  if (!serverReady) {
+    write(conn, {
+      id: req.id,
+      ok: false,
+      error: { code: 'transport-error', message: 'NanoClaw host is still starting; retry shortly' },
     });
     return;
   }

@@ -30,6 +30,11 @@ type ResponseFrame =
   | { id: string; ok: true; data: unknown; human?: string }
   | { id: string; ok: false; error: { code: string; message: string } };
 
+// The fallback host sweep is 60s. A live container normally uses the 1s poll,
+// but the CLI must survive one full fallback interval while runtime status is
+// being reconciled.
+const CLI_RESPONSE_TIMEOUT_MS = 90_000;
+
 // ---------------------------------------------------------------------------
 // Mailbox transport
 // ---------------------------------------------------------------------------
@@ -255,10 +260,10 @@ async function main(): Promise<void> {
   try {
     const requestId = generateId();
     await writeRequest(mailbox, { id: requestId, command, args: requestArgs });
-    const resp = await pollResponse(mailbox, requestId, 30_000);
+    const resp = await pollResponse(mailbox, requestId, CLI_RESPONSE_TIMEOUT_MS);
 
     if (!resp) {
-      process.stderr.write('ncl: command timed out after 30s\n');
+      process.stderr.write(`ncl: command timed out after ${CLI_RESPONSE_TIMEOUT_MS / 1000}s\n`);
       process.exitCode = 2;
       return;
     }

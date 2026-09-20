@@ -4,7 +4,10 @@ import path from 'node:path';
 import type { MessageInRow } from '../db/messages-in.js';
 import { touchHeartbeat } from '../heartbeat.js';
 
-const SCRIPT_TIMEOUT_MS = 30_000;
+// Must exceed the container ncl bridge's 90s response ceiling: pre-task
+// scripts can legitimately enqueue a host command and wait through one 60s
+// fallback delivery sweep while session liveness is being reconciled.
+const SCRIPT_TIMEOUT_MS = 120_000;
 const SCRIPT_MAX_BUFFER = 1024 * 1024;
 
 export interface ScriptResult {

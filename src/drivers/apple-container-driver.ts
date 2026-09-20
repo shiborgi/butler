@@ -353,6 +353,16 @@ class AppleContainerHandle implements SessionHandle {
     });
     proc.onExit((code) => {
       this.#attachExitCode = code;
+      // A null code is a failure of the local attach helper, not evidence that
+      // the VM stopped. The listing watch remains authoritative and will emit
+      // a terminal once the container actually disappears. Emitting here
+      // would race an immediate inspect and can mark a live session stopped.
+      if (code === null) {
+        log.warn('Container attach helper exited without a status; continuing supervision via runtime watch', {
+          containerName: this.name,
+        });
+        return;
+      }
       if (!this.#stopping && code !== 0 && code !== null && this.#stderrTail.length > 0) {
         log.warn('Container exited non-zero', { containerName: this.name, code, stderrTail: this.#stderrTail });
       }

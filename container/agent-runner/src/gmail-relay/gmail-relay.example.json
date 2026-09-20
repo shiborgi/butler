@@ -1,0 +1,32 @@
+{
+  "enabled": false,
+  "mcpRoute": "google-gmail",
+  "groupsOnly": true,
+  "maxMessagesPerPoll": 10,
+  "initialLookbackMinutes": 0,
+  "rules": [
+    {
+      "id": "structured-alert",
+      "match": {
+        "fromAddresses": ["alerts@example.com"],
+        "subjectRegex": "^Novo pedido",
+        "labelsAny": ["INBOX"],
+        "excludeBodyRegex": "cancelado"
+      },
+      "source": "text",
+      "fields": {
+        "order": {
+          "pattern": "Pedido[:\\s]+([A-Z0-9-]+)",
+          "flags": "iu",
+          "required": true
+        },
+        "total": {
+          "pattern": "Total[:\\s]+([^\\n]+)",
+          "flags": "iu",
+          "required": true
+        }
+      },
+      "template": "Novo pedido {{order}}\\nTotal: {{total}}"
+    }
+  ]
+}

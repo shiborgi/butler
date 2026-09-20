@@ -291,6 +291,15 @@ describe('gmail', () => {
     expect(toolBody(response)).toEqual({ historyExpired: true });
     expect(response.result.isError).toBeUndefined();
   });
+
+  it('marks a deleted history message as a consumed tombstone', async () => {
+    const failing: Fetcher = async () => {
+      throw new GoogleApiError('Message not found', 404);
+    };
+    const response = await call('google-gmail', 'get_message', { messageId: 'deleted-1' }, failing);
+    expect(toolBody(response)).toEqual({ id: 'deleted-1', notFound: true });
+    expect(response.result.isError).toBeUndefined();
+  });
 });
 
 describe('tasks', () => {

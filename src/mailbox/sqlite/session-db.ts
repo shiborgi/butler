@@ -309,6 +309,13 @@ export function migrateMessagesInTable(db: Database.Database): void {
     // All existing rows are normal messages, so default 0.
     db.prepare('ALTER TABLE messages_in ADD COLUMN on_wake INTEGER NOT NULL DEFAULT 0').run();
   }
+  // Failure history remains immutable, while this durable boundary lets a
+  // repaired, manually resumed series prove itself from a clean streak.
+  db.exec(`CREATE TABLE IF NOT EXISTS task_failure_resets (
+    series_id TEXT PRIMARY KEY,
+    from_seq INTEGER NOT NULL,
+    reset_at TEXT NOT NULL
+  )`);
 }
 
 /**

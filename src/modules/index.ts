@@ -23,4 +23,5 @@ import './approvals/index.js';
 import './interactive/index.js';
 import './permissions/index.js';
 import './agent-to-agent/index.js';
+import './gmail-relay/index.js';
 import './self-mod/index.js';
