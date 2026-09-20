@@ -60,6 +60,7 @@ beforeAll(() => {
   fs.mkdirSync(claudeShared, { recursive: true });
   fs.mkdirSync(path.join(groupDir, 'plugins'), { recursive: true });
   fs.writeFileSync(path.join(groupDir, 'container.json'), '{}');
+  fs.writeFileSync(path.join(groupDir, 'gmail-relay.json'), '{}');
   fs.writeFileSync(path.join(groupDir, 'CLAUDE.md'), '# composed\n');
 });
 
@@ -97,12 +98,26 @@ describe('buildMounts against the policy the drivers enforce', () => {
         '/workspace',
         '/workspace/agent',
         '/workspace/agent/container.json',
+        '/workspace/agent/gmail-relay.json',
+        '/workspace/agent/plugin-data/gmail-relay',
         '/workspace/agent/plugins',
         '/workspace/agent/CLAUDE.md',
         '/home/node/.claude',
         '/app/src',
       ]),
     );
+  });
+
+  it('mounts Gmail relay configuration read-only and checkpoint state read-write', async () => {
+    const byPath = new Map(toMountSpecs(await composedMounts(), GROUP_ID).map((m) => [m.containerPath, m]));
+    expect(byPath.get('/workspace/agent/gmail-relay.json')).toMatchObject({
+      class: 'group-state',
+      mode: 'ro',
+    });
+    expect(byPath.get('/workspace/agent/plugin-data/gmail-relay')).toMatchObject({
+      class: 'group-state',
+      mode: 'rw',
+    });
   });
 
   it('classes every mount for a root it actually lives under', async () => {

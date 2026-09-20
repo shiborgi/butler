@@ -892,6 +892,32 @@ export async function buildMounts(
     });
   }
 
+  // Apple Container does not reliably expose files that live only in a
+  // directory mount nested below the session's /workspace mount. Mount the
+  // Gmail relay's operator-owned config and durable state explicitly, just as
+  // we do for container.json and the composed project document above/below.
+  // The config is immutable inside the worker; only its checkpoint directory
+  // is writable so repeated task runs remain idempotent.
+  const gmailRelayConfigPath = path.join(groupDir, 'gmail-relay.json');
+  if (fs.existsSync(gmailRelayConfigPath)) {
+    const gmailRelayStateDir = path.join(groupDir, 'plugin-data', 'gmail-relay');
+    fs.mkdirSync(gmailRelayStateDir, { recursive: true });
+    mounts.push({
+      hostPath: gmailRelayConfigPath,
+      containerPath: '/workspace/agent/gmail-relay.json',
+      readonly: true,
+      mountClass: 'group-state',
+      scope,
+    });
+    mounts.push({
+      hostPath: gmailRelayStateDir,
+      containerPath: '/workspace/agent/plugin-data/gmail-relay',
+      readonly: false,
+      mountClass: 'group-state',
+      scope,
+    });
+  }
+
   // Stamped plugin content is immutable at runtime (the Agent Plugins
   // contract: writes go to plugin-data/, which stays RW via the group mount).
   // Same nested-RO pattern as container.json; initGroupFilesystem creates the
