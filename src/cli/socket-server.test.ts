@@ -5,7 +5,7 @@ import path from 'path';
 
 import { afterEach, describe, expect, it } from 'vitest';
 
-import { startCliServer, stopCliServer } from './socket-server.js';
+import { markCliServerReady, startCliServer, stopCliServer } from './socket-server.js';
 
 // Unix socket paths have a small OS limit — keep them short.
 function tmpSocketPath(): string {
@@ -52,5 +52,27 @@ describe('startCliServer single-bind', () => {
     const socketPath = tmpSocketPath();
     await startCliServer(socketPath);
     expect(fs.existsSync(socketPath)).toBe(true);
+  });
+
+  it('claims the socket during startup but rejects commands until the host is ready', async () => {
+    const socketPath = tmpSocketPath();
+    await startCliServer(socketPath);
+    const response = await new Promise<string>((resolve, reject) => {
+      const client = net.createConnection(socketPath);
+      let data = '';
+      client.once('connect', () => {
+        client.write(`${JSON.stringify({ id: 'startup-probe', command: 'unknown', args: {} })}\n`);
+      });
+      client.on('data', (chunk) => (data += chunk.toString()));
+      client.once('end', () => resolve(data));
+      client.once('error', reject);
+    });
+    expect(JSON.parse(response)).toMatchObject({
+      id: 'startup-probe',
+      ok: false,
+      error: { code: 'transport-error' },
+    });
+
+    markCliServerReady();
   });
 });

@@ -54,8 +54,8 @@ describe('provider skill descriptors', () => {
     expect(getSetupProvider('opencode')).toBeDefined();
 
     const addOpencode = fs.readFileSync(path.join('.claude', 'skills', 'add-opencode', 'SKILL.md'), 'utf-8');
-    expect(addOpencode).not.toMatch(/^```nc:append to:setup\/providers\/index\.ts/m);
-    expect(addOpencode).not.toMatch(/^setup\/providers\/opencode\.ts$/m);
+    expect(addOpencode).toMatch(/^```nc:append to:setup\/providers\/index\.ts/m);
+    expect(addOpencode).toContain('payload/setup/providers/opencode.ts -> setup/providers/opencode.ts');
   });
 
   it('never surfaces a descriptor with offered false in the installable list', () => {
@@ -135,7 +135,9 @@ describe('provider skill descriptors', () => {
       ].join('\n'),
     );
     expect(getInstallableProviderDescriptor('derived', root)?.installSkill).toBe('add-derived');
-    expect(getInstallableProviderDescriptor('derived', root)?.skillDir).toBe(path.join('.claude', 'skills', 'add-derived'));
+    expect(getInstallableProviderDescriptor('derived', root)?.skillDir).toBe(
+      path.join('.claude', 'skills', 'add-derived'),
+    );
   });
 
   it('rejects incomplete provider metadata instead of offering a partial install', () => {

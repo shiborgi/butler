@@ -72,7 +72,11 @@ describe('protocol surface', () => {
   it('rejects an unknown server and an unsupported method', async () => {
     const bad: any = await handleBuiltinMcp('google-photos', { id: 1, method: 'initialize' }, { accessToken: token });
     expect(bad.error.code).toBe(-32601);
-    const method: any = await handleBuiltinMcp('google-drive', { id: 2, method: 'resources/list' }, { accessToken: token });
+    const method: any = await handleBuiltinMcp(
+      'google-drive',
+      { id: 2, method: 'resources/list' },
+      { accessToken: token },
+    );
     expect(method.error.code).toBe(-32601);
   });
 });
@@ -85,7 +89,12 @@ describe('calendar', () => {
    */
   it('sends a bare date as an all-day event and a timestamp as a timed one', async () => {
     const { calls, fetcher } = recorder();
-    await call('google-calendar', 'create_event', { summary: 'Holiday', start: '2026-09-10', end: '2026-09-11' }, fetcher);
+    await call(
+      'google-calendar',
+      'create_event',
+      { summary: 'Holiday', start: '2026-09-10', end: '2026-09-11' },
+      fetcher,
+    );
     expect((calls[0]!.body as any).start).toEqual({ date: '2026-09-10' });
 
     const timed = recorder();
@@ -103,7 +112,12 @@ describe('calendar', () => {
     await call(
       'google-calendar',
       'create_event',
-      { summary: 'Review', start: '2026-09-10T09:00:00Z', end: '2026-09-10T10:00:00Z', attendees: ['a@x.test', 'b@x.test'] },
+      {
+        summary: 'Review',
+        start: '2026-09-10T09:00:00Z',
+        end: '2026-09-10T10:00:00Z',
+        attendees: ['a@x.test', 'b@x.test'],
+      },
       fetcher,
     );
     expect((calls[0]!.body as any).attendees).toEqual([{ email: 'a@x.test' }, { email: 'b@x.test' }]);
@@ -292,12 +306,12 @@ describe('gmail', () => {
     expect(response.result.isError).toBeUndefined();
   });
 
-  it('marks a deleted history message as a consumed tombstone', async () => {
+  it('turns a message deleted during polling into a consumable tombstone', async () => {
     const failing: Fetcher = async () => {
       throw new GoogleApiError('Message not found', 404);
     };
-    const response = await call('google-gmail', 'get_message', { messageId: 'deleted-1' }, failing);
-    expect(toolBody(response)).toEqual({ id: 'deleted-1', notFound: true });
+    const response = await call('google-gmail', 'get_message', { messageId: 'gone-1' }, failing);
+    expect(toolBody(response)).toEqual({ id: 'gone-1', notFound: true });
     expect(response.result.isError).toBeUndefined();
   });
 });

@@ -230,6 +230,24 @@ describe('adoption', () => {
 });
 
 describe('watchSessions', () => {
+  it('does not report a live container terminal when only the attach helper fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const events: SessionEvent[] = [];
+      const d = driver();
+      const handle = await d.prepare(fixtureSpec());
+      const watch = d.watchSessions('spike', (event) => events.push(event));
+      await handle.start();
+
+      cli.started[0].proc.emitExit(null);
+
+      expect(events).toEqual([]);
+      watch.stop();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('polls the listing and reports a vanished session as terminal', async () => {
     vi.useFakeTimers();
     try {

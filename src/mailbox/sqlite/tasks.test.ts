@@ -17,6 +17,7 @@ import {
   resumeTask,
   updateTask,
   getCompletedRecurring,
+  trailingFailedRuns,
   type RecurringMessage,
 } from './tasks.js';
 
@@ -144,6 +145,36 @@ describe('cancelTask / pauseTask / resumeTask series matching', () => {
     // A cancel-style copy-paste (clearing recurrence) would kill the series here.
     expect(after.recurrence).toBe(before.recurrence);
     expect(after.process_after).toBe(before.process_after);
+    db.close();
+  });
+
+  it('resume starts a new failure streak without erasing prior run history', () => {
+    const db = freshDb();
+    seedRecurringChain(db);
+    db.prepare("UPDATE messages_in SET status = 'failed' WHERE id IN ('task-orig', 'task-next')").run();
+
+    const msg: RecurringMessage = {
+      id: 'task-next',
+      content: JSON.stringify({ prompt: 'fixed monitor' }),
+      recurrence: '0 9 * * *',
+      series_id: 'task-orig',
+    };
+    insertRecurrence(db, msg, 'task-resumable', new Date().toISOString(), 'paused');
+    expect(trailingFailedRuns(db, 'task-orig')).toBe(2);
+
+    expect(resumeTask(db, 'task-orig')).toBe(1);
+    expect(trailingFailedRuns(db, 'task-orig')).toBe(0);
+
+    db.prepare("UPDATE messages_in SET status = 'failed' WHERE id = 'task-resumable'").run();
+    expect(trailingFailedRuns(db, 'task-orig')).toBe(1);
+    const historicalFailures = (
+      db
+        .prepare("SELECT COUNT(*) AS count FROM messages_in WHERE series_id = ? AND status = 'failed'")
+        .get('task-orig') as {
+        count: number;
+      }
+    ).count;
+    expect(historicalFailures).toBe(3);
     db.close();
   });
 });
