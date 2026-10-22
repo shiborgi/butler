@@ -300,6 +300,36 @@ describe('watchSessions', () => {
   });
 });
 
+describe('status while a container is starting', () => {
+  /*
+   * Apple Container lists a created container, and one whose start is still
+   * in flight, as `stopped`. A listing poll in that window used to read as a
+   * dead session: the host killed it and respawned, up to three times.
+   */
+  const stopped = () => [{ match: /^inspect /, output: JSON.stringify([{ status: { state: 'stopped' } }]) }];
+
+  it('reads a prepared container the runtime lists as stopped as ready', async () => {
+    const handle = await driver().prepare(fixtureSpec());
+    cli.responses = stopped();
+    expect((await handle.status()).phase).toBe('ready');
+  });
+
+  it('reads a started container as running while its attach is alive', async () => {
+    const handle = await driver().prepare(fixtureSpec());
+    await handle.start();
+    cli.responses = stopped();
+    expect((await handle.status()).phase).toBe('running');
+  });
+
+  it('reads it as ended once the attach has exited', async () => {
+    const handle = await driver().prepare(fixtureSpec());
+    await handle.start();
+    cli.started[0].proc.emitExit(0);
+    cli.responses = stopped();
+    expect((await handle.status()).phase).toBe('stopped');
+  });
+});
+
 describe('early exit diagnosis', () => {
   /*
    * A session whose attach ends right after start is respawned by the host;
@@ -318,6 +348,18 @@ describe('early exit diagnosis', () => {
     expect(log.warn).toHaveBeenCalledWith(
       'Container ended shortly after start',
       expect.objectContaining({ code: 0, state: 'absent', stderrTail: ['[agent-runner] boom'] }),
+    );
+  });
+
+  it('names an early stop the host decided on, with what the runtime showed', async () => {
+    const handle = await driver().prepare(fixtureSpec());
+    await handle.start();
+    cli.responses = [{ match: /^inspect /, output: JSON.stringify([{ status: { state: 'stopped' } }]) }];
+    await handle.stop('runtime-ended');
+
+    expect(log.warn).toHaveBeenCalledWith(
+      'Session container stopped shortly after start',
+      expect.objectContaining({ reason: 'runtime-ended', state: 'stopped' }),
     );
   });
 

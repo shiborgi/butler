@@ -441,6 +441,14 @@ class AppleContainerHandle implements SessionHandle {
     const state = recordState(record);
     if (state === 'running') return { phase: 'running' };
     if (state === 'created') return { phase: 'ready' };
+    // This runtime has no `created` state: a container that was created and
+    // not yet started, and one whose `start` is still bringing the VM up,
+    // both list as `stopped`. Read as ended, a listing poll that lands in that
+    // window had the host kill a healthy session and respawn it. While this
+    // handle's own attach is alive, the attach exit is the authority on
+    // whether it ended, exactly as in the already-removed branch above.
+    if (!this.#stopping && this.pendingSpec && !this.#proc) return { phase: 'ready' };
+    if (!this.#stopping && this.#proc && this.#attachExitCode === undefined) return { phase: 'running' };
     // Anything else is ended. Unlike Docker, this runtime's `inspect` carries
     // NO exit code — a container that died with 7 reports only
     // `state: "stopped"` — so the attach process is the sole witness to how it
@@ -455,6 +463,19 @@ class AppleContainerHandle implements SessionHandle {
   }
 
   async stop(reason: string): Promise<void> {
+    const elapsedMs = Date.now() - this.#startedAt;
+    if (!this.#stopping && this.#proc && elapsedMs < EARLY_EXIT_MS) {
+      // A stop this early is the host reacting to something it saw; name it,
+      // or a respawn burst reads as nothing but `runtime-ended`.
+      log.warn('Session container stopped shortly after start', {
+        containerName: this.name,
+        reason,
+        elapsedMs,
+        state: this.#stateForDiagnosis(),
+        attachExitCode: this.#attachExitCode,
+        stderrTail: [...this.#stderrTail],
+      });
+    }
     this.#stopping = true;
     log.info('Stopping session container', { containerName: this.name, reason });
     const grace = String(this.pendingSpec?.stopGraceSeconds ?? 1);
