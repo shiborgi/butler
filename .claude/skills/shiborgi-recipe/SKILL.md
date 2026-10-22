@@ -19,7 +19,7 @@ checkout of that `main` plus only what is its own.
 | `add-whatsapp` | The channel |
 | `add-gmail-relay` | Gmail → WhatsApp broadcasts without waking the model |
 
-Per install, never in main: `add-lastro` (butler), personas under `templates/`
+Per install, never in main: personas under `templates/`
 (gitignored), `groups/`, `data/`, `store/`, `.env`.
 
 ## A new install on a Mac
