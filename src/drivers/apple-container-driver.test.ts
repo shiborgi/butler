@@ -32,6 +32,8 @@ vi.mock('fs', () => ({ default: { existsSync: vi.fn(() => true) } }));
 
 import fs from 'fs';
 
+import { log } from '../log.js';
+
 let cli: FakeCli;
 
 function driver(networkArgsFor?: () => string[]): AppleContainerSessionDriver {
@@ -292,6 +294,52 @@ describe('watchSessions', () => {
       await vi.advanceTimersByTimeAsync(0);
       await vi.advanceTimersByTimeAsync(5_000);
       expect(events).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('early exit diagnosis', () => {
+  /*
+   * A session whose attach ends right after start is respawned by the host;
+   * this line is the only record of why, so it carries the state and stderr.
+   */
+  it('records how a container that ended right after start went', async () => {
+    const d = driver();
+    const handle = await d.prepare(fixtureSpec());
+    d.watchSessions('spike', () => {});
+    await handle.start();
+    cli.responses = [{ match: /^inspect /, output: '[]' }];
+    const proc = cli.started[0].proc;
+    proc.emitStderr('[agent-runner] boom');
+    proc.emitExit(0);
+
+    expect(log.warn).toHaveBeenCalledWith(
+      'Container ended shortly after start',
+      expect.objectContaining({ code: 0, state: 'absent', stderrTail: ['[agent-runner] boom'] }),
+    );
+  });
+
+  it('stays quiet when the host stopped the container itself', async () => {
+    const d = driver();
+    const handle = await d.prepare(fixtureSpec());
+    await handle.start();
+    await handle.stop('test');
+    cli.started[0].proc.emitExit(0);
+
+    expect(log.warn).not.toHaveBeenCalledWith('Container ended shortly after start', expect.anything());
+  });
+
+  it('stays quiet for a session that ran its course', async () => {
+    vi.useFakeTimers();
+    try {
+      const d = driver();
+      const handle = await d.prepare(fixtureSpec());
+      await handle.start();
+      vi.advanceTimersByTime(60_000);
+      cli.started[0].proc.emitExit(0);
+      expect(log.warn).not.toHaveBeenCalledWith('Container ended shortly after start', expect.anything());
     } finally {
       vi.useRealTimers();
     }

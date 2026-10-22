@@ -8,3 +8,4 @@
 
 import './cli.js';
 import './whatsapp.js';
+import './whatsapp-log-guard.js';

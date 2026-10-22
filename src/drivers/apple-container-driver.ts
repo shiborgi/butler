@@ -338,8 +338,16 @@ export class AppleContainerSessionDriver implements SessionDriver {
   }
 }
 
+/**
+ * An attach that ends this soon after start, without the host asking, is a
+ * session that never really ran. The host respawns it, so without a record
+ * here the only trace is a burst of `runtime-ended` lines with no cause.
+ */
+const EARLY_EXIT_MS = 10_000;
+
 class AppleContainerHandle implements SessionHandle {
   #proc: SupervisedProcess | null = null;
+  #startedAt = 0;
   /** Log hygiene only — events are never intent-filtered here (that is the hub's job). */
   #stopping = false;
   #attachExitCode: number | null | undefined;
@@ -360,6 +368,7 @@ class AppleContainerHandle implements SessionHandle {
     // exit code and streams the stderr that explains a boot failure.
     const proc = this.cli.start(['start', '--attach', this.name]);
     this.#proc = proc;
+    this.#startedAt = Date.now();
     proc.onStderr((line) => {
       log.debug(line, { container: this.name });
       this.#stderrTail.push(line);
@@ -377,11 +386,30 @@ class AppleContainerHandle implements SessionHandle {
         });
         return;
       }
-      if (!this.#stopping && code !== 0 && code !== null && this.#stderrTail.length > 0) {
+      const elapsedMs = Date.now() - this.#startedAt;
+      if (!this.#stopping && elapsedMs < EARLY_EXIT_MS) {
+        log.warn('Container ended shortly after start', {
+          containerName: this.name,
+          code,
+          elapsedMs,
+          state: this.#stateForDiagnosis(),
+          stderrTail: [...this.#stderrTail],
+        });
+      } else if (!this.#stopping && code !== 0 && this.#stderrTail.length > 0) {
         log.warn('Container exited non-zero', { containerName: this.name, code, stderrTail: this.#stderrTail });
       }
       this.emit({ key: this.key, kind: 'terminal' });
     });
+  }
+
+  /** What the runtime says right now, for a log line only; never throws. */
+  #stateForDiagnosis(): string {
+    try {
+      const record = inspectRecord(this.cli, this.name);
+      return record ? recordState(record) : 'absent';
+    } catch (error) {
+      return `inspect-failed: ${error instanceof Error ? error.message.slice(0, 200) : String(error)}`;
+    }
   }
 
   async status(): Promise<SessionStatus> {
