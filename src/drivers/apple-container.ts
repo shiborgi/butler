@@ -69,5 +69,6 @@ registerSessionDriver(
       ...policy,
       networkArgsFor: appleNetworkArgs,
       reconcileNetworkAccess: reconcileAppleNetworkAccess,
+      fileStagingDir: path.join(DATA_DIR, 'apple-container', 'files'),
     }),
 );

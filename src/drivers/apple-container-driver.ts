@@ -25,6 +25,9 @@
  * as `dockerNetworkArgs` is for Docker — `spec.network` states the intent, the
  * registration realizes it, and nothing argv-shaped rides between them.
  */
+import fs from 'fs';
+import path from 'path';
+
 import { log } from '../log.js';
 
 import { realCli, validateRuntimeName, type Cli, type SupervisedProcess } from './cli.js';
@@ -37,6 +40,7 @@ import {
   validateSpec,
   type DriverCapabilities,
   type MountPolicy,
+  type MountSpec,
   type NetworkAccessIntent,
   type SessionDriver,
   type SessionEvent,
@@ -60,6 +64,44 @@ export interface AppleContainerDriverOptions extends MountPolicy {
   networkArgsFor?: (spec: SessionSpec) => string[];
   /** Re-realize a gateway destination for an adopted session — see `reconcileNetworkAccess`. */
   reconcileNetworkAccess?: (access: NetworkAccessIntent) => Promise<void> | void;
+  /** Where read-only file mounts that collide with a directory mount are copied — see `planFileMounts`. */
+  fileStagingDir?: string;
+}
+
+/**
+ * Apple Container 1.3 shares a file mount through its parent directory, and
+ * when that directory is also mounted as a directory the directory mount is
+ * dropped without a word. Composition does exactly that — the group folder
+ * at /workspace/agent with container.json and CLAUDE.md bound read-only on
+ * top — so the agent silently wrote its memory and plugin-data into the
+ * session folder instead of the group's.
+ *
+ * Such a file is mounted from its own copy instead, in a directory nothing
+ * else shares. Only read-only files qualify: they are composed at spawn and a
+ * copy is the same bytes; a writable one would lose its writes, so it is
+ * refused rather than half-realized. Files whose parent is not mounted keep
+ * their source — the hosts file is rewritten in place for running sessions.
+ */
+export function planFileMounts(
+  mounts: readonly MountSpec[],
+  isDirectory: (hostPath: string) => boolean,
+  stagingDir: string,
+): { mounts: MountSpec[]; copies: { from: string; to: string }[] } {
+  const directories = new Set(mounts.filter((m) => isDirectory(m.hostPath)).map((m) => m.hostPath));
+  const copies: { from: string; to: string }[] = [];
+  const planned = mounts.map((mount, index) => {
+    if (directories.has(mount.hostPath) || !directories.has(path.dirname(mount.hostPath))) return mount;
+    if (mount.mode !== 'ro') {
+      throw specInvalid(
+        `apple-container cannot mount the writable file ${mount.hostPath} inside the mounted directory ` +
+          `${path.dirname(mount.hostPath)}: the runtime would drop the directory mount`,
+      );
+    }
+    const to = path.join(stagingDir, `${index}-${path.basename(mount.hostPath)}`);
+    copies.push({ from: mount.hostPath, to });
+    return { ...mount, hostPath: to };
+  });
+  return { mounts: planned, copies };
 }
 
 interface AppleWatch {
@@ -93,6 +135,7 @@ export class AppleContainerSessionDriver implements SessionDriver {
   readonly #policy: MountPolicy;
   readonly #networkArgs: ((spec: SessionSpec) => string[]) | undefined;
   readonly #reconcileNetwork: AppleContainerDriverOptions['reconcileNetworkAccess'];
+  readonly #fileStagingDir: string | undefined;
   readonly #watches = new Map<string, AppleWatch>();
   /** Every key this driver handed out, per install — see the Docker driver's `#knownKeys`. */
   readonly #knownKeys = new Map<string, Map<string, SessionKey>>();
@@ -104,6 +147,7 @@ export class AppleContainerSessionDriver implements SessionDriver {
     this.#policy = opts;
     this.#networkArgs = opts.networkArgsFor;
     this.#reconcileNetwork = opts.reconcileNetworkAccess;
+    this.#fileStagingDir = opts.fileStagingDir;
   }
 
   /**
@@ -162,6 +206,7 @@ export class AppleContainerSessionDriver implements SessionDriver {
     }
 
     assertMountSourcesExist(agent.mounts);
+    const mounts = this.#stageFileMounts(agent.mounts, name);
 
     const args = ['create', '--rm', '--name', name];
     args.push(...labelArgs(labelsForKey(spec.key, 'agent', { ...spec.labels, ...(agent.labels ?? {}) })));
@@ -172,7 +217,7 @@ export class AppleContainerSessionDriver implements SessionDriver {
     // composed literals, which last-wins argv ordering realizes.
     args.push(...envArgs(agent.env));
     args.push(...envArgs(agent.contributedEnv ?? {}));
-    args.push(...mountArgs(agent.mounts));
+    args.push(...mountArgs(mounts));
     args.push(...this.#networkArgsFor(spec));
     if (agent.command && agent.command.length > 0) {
       args.push('--entrypoint', agent.command[0], agent.image, ...agent.command.slice(1), ...(agent.args ?? []));
@@ -191,6 +236,18 @@ export class AppleContainerSessionDriver implements SessionDriver {
       throw normalizeAppleContainerError(error);
     }
     return new AppleContainerHandle(spec.key, name, this.#cli, spec, this.#emit);
+  }
+
+  #stageFileMounts(mounts: readonly MountSpec[], name: string): MountSpec[] {
+    if (!this.#fileStagingDir) return [...mounts];
+    const stagingDir = path.join(this.#fileStagingDir, name);
+    const plan = planFileMounts(mounts, (hostPath) => fs.statSync(hostPath).isDirectory(), stagingDir);
+    if (plan.copies.length > 0) {
+      fs.rmSync(stagingDir, { recursive: true, force: true });
+      fs.mkdirSync(stagingDir, { recursive: true });
+      for (const { from, to } of plan.copies) fs.copyFileSync(from, to);
+    }
+    return plan.mounts;
   }
 
   #networkArgsFor(spec: SessionSpec): string[] {

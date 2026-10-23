@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   AppleContainerSessionDriver,
+  planFileMounts,
   appleStatePhase,
   isRuntimeUnavailable,
   normalizeAppleContainerError,
@@ -21,14 +22,22 @@ import {
 } from './apple-container-driver.js';
 import { FakeCli } from './fake-cli.js';
 import { FIXTURE_POLICY, fixtureSpec, fixtureSpecWithAux } from './spec-fixture.js';
-import { LABELS, type SessionEvent } from './types.js';
+import { GROUP_FOLDER_LABEL, LABELS, type SessionEvent } from './types.js';
 
 vi.mock('../log.js', () => ({
   log: { debug: vi.fn(), info: vi.fn(), warn: vi.fn(), error: vi.fn(), fatal: vi.fn() },
 }));
 
 // The driver re-checks that mount sources exist; fixture paths are not real files.
-vi.mock('fs', () => ({ default: { existsSync: vi.fn(() => true) } }));
+vi.mock('fs', () => ({
+  default: {
+    existsSync: vi.fn(() => true),
+    statSync: vi.fn((p: string) => ({ isDirectory: () => !/\.(json|md|pem)$/.test(p) })),
+    rmSync: vi.fn(),
+    mkdirSync: vi.fn(),
+    copyFileSync: vi.fn(),
+  },
+}));
 
 import fs from 'fs';
 
@@ -297,6 +306,70 @@ describe('watchSessions', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe('file mounts inside a mounted directory', () => {
+  /*
+   * Apple Container 1.3 drops a directory mount when a file inside it is also
+   * mounted on its own; the group folder silently became the session folder.
+   */
+  const dir = (p: string) => !/\.(json|md)$/.test(p);
+  const mount = (hostPath: string, containerPath: string, mode: 'ro' | 'rw' = 'ro') =>
+    ({ class: 'group-state', hostPath, containerPath, mode, groupScope: 'g' }) as const;
+
+  it('copies a read-only file whose directory is mounted, and leaves the rest alone', () => {
+    const plan = planFileMounts(
+      [
+        mount('/g/folder', '/workspace/agent', 'rw'),
+        mount('/g/folder/container.json', '/workspace/agent/container.json'),
+        mount('/hosts/ncl-x', '/etc/hosts'),
+      ],
+      dir,
+      '/stage/ncl-x',
+    );
+    expect(plan.copies).toEqual([{ from: '/g/folder/container.json', to: '/stage/ncl-x/1-container.json' }]);
+    expect(plan.mounts.map((m) => m.hostPath)).toEqual(['/g/folder', '/stage/ncl-x/1-container.json', '/hosts/ncl-x']);
+    expect(plan.mounts[1].mode).toBe('ro');
+  });
+
+  it('refuses a writable file there rather than losing its writes', () => {
+    expect(() =>
+      planFileMounts(
+        [
+          mount('/g/folder', '/workspace/agent', 'rw'),
+          mount('/g/folder/state.json', '/workspace/agent/state.json', 'rw'),
+        ],
+        dir,
+        '/stage',
+      ),
+    ).toThrow(/writable file/);
+  });
+
+  it('realizes the staged copy in the create argv when staging is configured', async () => {
+    const spec = fixtureSpec();
+    spec.labels = { ...spec.labels, [GROUP_FOLDER_LABEL]: 'g1' };
+    const agent = spec.containers[0];
+    agent.mounts = [
+      { ...mount('/install/groups/g1', '/workspace/agent', 'rw'), groupScope: 'g1' },
+      { ...mount('/install/groups/g1/CLAUDE.md', '/workspace/agent/CLAUDE.md'), groupScope: 'g1' },
+    ] as unknown as typeof agent.mounts;
+    const d = new AppleContainerSessionDriver({
+      ...FIXTURE_POLICY,
+      cli,
+      fileStagingDir: '/install/data/apple-container/files',
+    });
+    await d.prepare(spec);
+    const args = cli.callMatching(/^create /)?.args ?? [];
+    expect(
+      args.some(
+        (a) =>
+          a.endsWith('-CLAUDE.md:/workspace/agent/CLAUDE.md:ro') &&
+          a.startsWith('/install/data/apple-container/files/'),
+      ),
+    ).toBe(true);
+    expect(args).toContain('/install/groups/g1:/workspace/agent');
+    expect(fs.copyFileSync).toHaveBeenCalledWith('/install/groups/g1/CLAUDE.md', expect.stringContaining('-CLAUDE.md'));
   });
 });
 
