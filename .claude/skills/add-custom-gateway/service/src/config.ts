@@ -67,11 +67,27 @@ export interface McpRoute {
   auth?: McpAuth;
 }
 
+/**
+ * A read-only HTTP route for files an agent saves to disk — a listing's photo,
+ * say — so the bytes go to the file and never through the model's context.
+ * GET and HEAD only, limited to the content types listed and to a size.
+ */
+export interface FileRoute {
+  /** Base URL; the caller's path below `/files/<name>/` is appended to it. */
+  url: string;
+  auth?: UpstreamAuth;
+  /** Accepted `content-type` prefixes, e.g. `image/`. */
+  contentTypes: string[];
+  maxBytes: number;
+}
+
 export interface AgentPolicy {
   /** Model aliases this agent may use. `["*"]` means every configured model. */
   models: string[];
   /** MCP server names this agent may reach. `["*"]` means every configured one. */
   mcpServers: string[];
+  /** File route names this agent may read. `["*"]` means every configured one. */
+  files: string[];
 }
 
 export interface GatewayConfig {
@@ -80,6 +96,7 @@ export interface GatewayConfig {
   models: Record<string, ModelRoute>;
   mcpServers: Record<string, McpRoute>;
   oauthProfiles: Record<string, GoogleOAuthProfile>;
+  fileRoutes: Record<string, FileRoute>;
   /** Keyed by agent group id. `*` is the fallback for a group with no entry. */
   agents: Record<string, AgentPolicy>;
 }
@@ -173,10 +190,12 @@ export function parseConfig(raw: string): GatewayConfig {
       throw new GatewayConfigError(`oauthProfiles.${name}.scopes must be an array of non-empty strings`);
     }
     oauthProfiles[name] = {
-      provider: 'google', expectedEmail: requireString(entry.expectedEmail, `oauthProfiles.${name}.expectedEmail`),
+      provider: 'google',
+      expectedEmail: requireString(entry.expectedEmail, `oauthProfiles.${name}.expectedEmail`),
       clientIdSecret: requireString(entry.clientIdSecret, `oauthProfiles.${name}.clientIdSecret`),
       clientSecretSecret: requireString(entry.clientSecretSecret, `oauthProfiles.${name}.clientSecretSecret`),
-      refreshTokenSecret: requireString(entry.refreshTokenSecret, `oauthProfiles.${name}.refreshTokenSecret`), scopes,
+      refreshTokenSecret: requireString(entry.refreshTokenSecret, `oauthProfiles.${name}.refreshTokenSecret`),
+      scopes,
     };
   }
 
@@ -193,27 +212,54 @@ export function parseConfig(raw: string): GatewayConfig {
       );
     }
     mcpServers[name] = {
-      ...(builtin === undefined
-        ? { url: requireString(entry.url, `mcpServers.${name}.url`) }
-        : { builtin }),
+      ...(builtin === undefined ? { url: requireString(entry.url, `mcpServers.${name}.url`) } : { builtin }),
       auth:
-        typeof entry.auth === 'object' && entry.auth !== null && (entry.auth as Record<string, unknown>).kind === 'oauth2'
-          ? { kind: 'oauth2', profile: requireString((entry.auth as Record<string, unknown>).profile, `mcpServers.${name}.auth.profile`) }
+        typeof entry.auth === 'object' &&
+        entry.auth !== null &&
+        (entry.auth as Record<string, unknown>).kind === 'oauth2'
+          ? {
+              kind: 'oauth2',
+              profile: requireString(
+                (entry.auth as Record<string, unknown>).profile,
+                `mcpServers.${name}.auth.profile`,
+              ),
+            }
           : parseAuth(entry.auth, `mcpServers.${name}.auth`),
+    };
+  }
+
+  const fileRoutes: Record<string, FileRoute> = {};
+  for (const [name, value] of Object.entries(requireObject(doc.fileRoutes ?? {}, 'fileRoutes'))) {
+    const entry = requireObject(value, `fileRoutes.${name}`);
+    const url = requireString(entry.url, `fileRoutes.${name}.url`).replace(/\/+$/, '');
+    if (!/^https?:\/\//.test(url)) throw new GatewayConfigError(`fileRoutes.${name}.url must be an http(s) URL`);
+    const types = entry.contentTypes ?? ['image/'];
+    if (!Array.isArray(types) || types.length === 0 || types.some((t) => typeof t !== 'string' || !t)) {
+      throw new GatewayConfigError(`fileRoutes.${name}.contentTypes must be a non-empty array of strings`);
+    }
+    const maxBytes = entry.maxBytes ?? 10_000_000;
+    if (typeof maxBytes !== 'number' || !Number.isInteger(maxBytes) || maxBytes < 1 || maxBytes > 50_000_000) {
+      throw new GatewayConfigError(`fileRoutes.${name}.maxBytes must be an integer from 1 to 50000000`);
+    }
+    fileRoutes[name] = {
+      url,
+      auth: parseAuth(entry.auth, `fileRoutes.${name}.auth`),
+      contentTypes: types as string[],
+      maxBytes,
     };
   }
 
   const agents: Record<string, AgentPolicy> = {};
   for (const [id, value] of Object.entries(requireObject(doc.agents ?? {}, 'agents'))) {
     const entry = requireObject(value, `agents.${id}`);
-    const list = (field: 'models' | 'mcpServers'): string[] => {
+    const list = (field: 'models' | 'mcpServers' | 'files'): string[] => {
       const raw = entry[field] ?? [];
       if (!Array.isArray(raw) || raw.some((v) => typeof v !== 'string')) {
         throw new GatewayConfigError(`agents.${id}.${field} must be an array of strings`);
       }
       return raw as string[];
     };
-    agents[id] = { models: list('models'), mcpServers: list('mcpServers') };
+    agents[id] = { models: list('models'), mcpServers: list('mcpServers'), files: list('files') };
   }
 
   for (const [name, route] of Object.entries(mcpServers)) {
@@ -221,7 +267,7 @@ export function parseConfig(raw: string): GatewayConfig {
       throw new GatewayConfigError(`mcpServers.${name}.auth.profile "${route.auth.profile}" is not configured`);
     }
   }
-  return { schemaVersion: 1, upstreams, models, mcpServers, oauthProfiles, agents };
+  return { schemaVersion: 1, upstreams, models, mcpServers, oauthProfiles, fileRoutes, agents };
 }
 
 /** `KEY=value` lines; `#` comments and blanks ignored. Values are not unquoted-parsed beyond trimming. */
