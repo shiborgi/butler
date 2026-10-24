@@ -25,14 +25,7 @@
  * SSE token deltas reach the agent as they arrive. Buffering here would make
  * every reply land at once after a long silence.
  */
-import {
-  allows,
-  authHeader,
-  loadConfig,
-  policyFor,
-  GatewayConfigError,
-  type LoadedConfig,
-} from './config.js';
+import { allows, authHeader, loadConfig, policyFor, GatewayConfigError, type LoadedConfig } from './config.js';
 import { bearerToken, verifyClientKey } from './identity.js';
 import { googleAccessToken } from './google-oauth.js';
 import { handleBuiltinMcp } from './google-mcp.js';
@@ -241,6 +234,104 @@ async function handleMcp(
   return forwardableResponse(response);
 }
 
+/** Path below a file route: plain segments only, so it cannot climb out of the route. */
+const FILE_PATH = /^[A-Za-z0-9_-][A-Za-z0-9._-]*(\/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$/;
+
+/**
+ * A file an agent saves to disk, read through the gateway because the agent
+ * has no other way out. Only GET and HEAD, only the route's content types, and
+ * never more than its size: a route meant for photos must not turn into a
+ * general proxy or a way to fill the agent's disk.
+ */
+async function handleFile(
+  request: Request,
+  loaded: LoadedConfig,
+  agentGroupId: string,
+  name: string,
+  rest: string,
+): Promise<Response> {
+  const { config, secrets } = loaded;
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    return apiError(405, 'File routes accept GET and HEAD only', 'invalid_request_error');
+  }
+  const policy = policyFor(config, agentGroupId);
+  if (!policy) {
+    return apiError(403, `No gateway policy for agent group ${agentGroupId}`, 'permission_error');
+  }
+  const route = config.fileRoutes[name];
+  if (!route) {
+    return apiError(404, `File route "${name}" is not configured on this gateway`, 'invalid_request_error');
+  }
+  if (!allows(policy.files, name)) {
+    return apiError(403, `Agent group ${agentGroupId} may not use file route "${name}"`, 'permission_error');
+  }
+  if (!FILE_PATH.test(rest) || rest.split('/').some((part) => part === '..' || part === '.')) {
+    return apiError(400, 'File path must be plain path segments', 'invalid_request_error');
+  }
+
+  // Nothing of the caller's request is forwarded but the method: its headers
+  // carry the agent's placeholders, and a query string is not part of a file.
+  const headers = new Headers({ accept: route.contentTypes.join(', ') });
+  const auth = authHeader(route.auth, secrets);
+  if (auth) headers.set(auth.name, auth.value);
+  const upstream = await fetch(`${route.url}/${rest}`, {
+    method: request.method,
+    headers,
+    redirect: 'error',
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!upstream.ok) {
+    await upstream.body?.cancel();
+    const status = upstream.status === 404 ? 404 : 502;
+    return apiError(status, `File route "${name}" answered ${upstream.status}`, 'api_error');
+  }
+  const type = upstream.headers.get('content-type') ?? '';
+  if (!route.contentTypes.some((prefix) => type.toLowerCase().startsWith(prefix.toLowerCase()))) {
+    await upstream.body?.cancel();
+    return apiError(502, `File route "${name}" returned a ${type || 'untyped'} body`, 'api_error');
+  }
+  const declared = Number(upstream.headers.get('content-length') ?? '0');
+  if (declared > route.maxBytes) {
+    await upstream.body?.cancel();
+    return apiError(502, `File route "${name}" returned more than ${route.maxBytes} bytes`, 'api_error');
+  }
+  const responseHeaders = new Headers({ 'content-type': type });
+  if (request.method === 'HEAD' || !upstream.body) {
+    if (declared > 0) responseHeaders.set('content-length', String(declared));
+    return new Response(null, { status: 200, headers: responseHeaders });
+  }
+  // A missing or false content-length is caught while reading.
+  const body = await readLimited(upstream.body, route.maxBytes);
+  if (!body) {
+    return apiError(502, `File route "${name}" returned more than ${route.maxBytes} bytes`, 'api_error');
+  }
+  responseHeaders.set('content-length', String(body.byteLength));
+  return new Response(body, { status: 200, headers: responseHeaders });
+}
+
+async function readLimited(stream: ReadableStream<Uint8Array>, limit: number): Promise<Uint8Array | null> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return out;
+}
+
 export async function handle(request: Request): Promise<Response> {
   const url = new URL(request.url);
 
@@ -278,6 +369,10 @@ export async function handle(request: Request): Promise<Response> {
     const mcp = /^\/mcp\/([A-Za-z0-9_-]{1,64})$/.exec(url.pathname);
     if (mcp) {
       return await handleMcp(request, url, loaded, identity.agentGroupId, mcp[1]!);
+    }
+    const file = /^\/files\/([A-Za-z0-9_-]{1,64})\/(.+)$/.exec(url.pathname);
+    if (file) {
+      return await handleFile(request, loaded, identity.agentGroupId, file[1]!, file[2]!);
     }
   } catch (error) {
     // A missing secret or an unreachable upstream is the operator's problem to

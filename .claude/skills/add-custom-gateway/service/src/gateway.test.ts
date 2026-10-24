@@ -150,7 +150,10 @@ describe('request handling', () => {
         },
         models: { default: { upstream: 'anthropic', model: 'claude-sonnet-5' } },
         mcpServers: {
-          notes: { url: 'https://mcp.example.com/mcp', auth: { header: 'Authorization', format: 'Bearer {value}', secret: 'NOTES_TOKEN' } },
+          notes: {
+            url: 'https://mcp.example.com/mcp',
+            auth: { header: 'Authorization', format: 'Bearer {value}', secret: 'NOTES_TOKEN' },
+          },
           secret_one: { url: 'https://mcp.example.com/other' },
         },
         agents: { 'ag-bar': { models: ['default'], mcpServers: ['notes'] } },
@@ -258,7 +261,7 @@ describe('request handling', () => {
     expect(seen!.headers.get('authorization')).toBe('Bearer notes-upstream');
   });
 
-  it('refuses a path key that is not this install\'s', async () => {
+  it("refuses a path key that is not this install's", async () => {
     const response = await handle(
       new Request(`http://gw/g/ncl.ag-bar.${'0'.repeat(32)}/mcp/notes`, { method: 'POST', body: '{}' }),
     );
@@ -274,9 +277,105 @@ describe('request handling', () => {
   });
 
   it('has no route for anything else', async () => {
-    const response = await handle(
-      new Request('http://gw/anything', { headers: { authorization: `Bearer ${token}` } }),
-    );
+    const response = await handle(new Request('http://gw/anything', { headers: { authorization: `Bearer ${token}` } }));
     expect(response.status).toBe(404);
+  });
+});
+
+describe('file routes', () => {
+  const secret = 'c'.repeat(64);
+  const keyFor = (group: string) =>
+    `ncl.${group}.${new Bun.CryptoHasher('sha256', secret).update(group).digest('hex').slice(0, 32)}`;
+  let seen: { url: string; headers: Headers; method: string } | null;
+  let reply: () => Response;
+  let realFetch: typeof globalThis.fetch;
+  let handle: (request: Request) => Promise<Response>;
+
+  beforeEach(async () => {
+    seen = null;
+    reply = () => new Response(new Uint8Array([1, 2, 3]), { headers: { 'content-type': 'image/jpeg' } });
+    realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      seen = { url: String(input), headers: new Headers(init?.headers), method: init?.method ?? 'GET' };
+      return reply();
+    }) as typeof globalThis.fetch;
+    process.env.NANOCLAW_GATEWAY_SECRET = secret;
+    const dir = `${tmpdir()}/nanoclaw-gateway-files-${Bun.randomUUIDv7()}`;
+    process.env.GATEWAY_CONFIG = `${dir}/gateway.json`;
+    process.env.GATEWAY_SECRETS = `${dir}/secrets.env`;
+    await Bun.write(
+      process.env.GATEWAY_CONFIG,
+      JSON.stringify({
+        schemaVersion: 1,
+        fileRoutes: { photos: { url: 'http://marketplace:3002/photos/', maxBytes: 10 } },
+        agents: {
+          'ag-butler': { models: [], mcpServers: [], files: ['photos'] },
+          'ag-bar': { models: [], mcpServers: [] },
+        },
+      }),
+    );
+    await Bun.write(process.env.GATEWAY_SECRETS, '');
+    ({ handle } = await import(`./index.js?t=${Date.now()}`));
+  });
+
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  const get = (path: string, group = 'ag-butler', init: RequestInit = {}) =>
+    handle(new Request(`http://gw/g/${keyFor(group)}${path}`, init));
+
+  it('returns the file to an allowed group and forwards none of its headers', async () => {
+    const response = await get('/files/photos/facebook/123/1', 'ag-butler', {
+      headers: { authorization: 'Bearer placeholder', cookie: 'x=1' },
+    });
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toBe('image/jpeg');
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
+    expect(seen!.url).toBe('http://marketplace:3002/photos/facebook/123/1');
+    expect(seen!.headers.get('authorization')).toBeNull();
+    expect(seen!.headers.get('cookie')).toBeNull();
+  });
+
+  it('refuses a group whose policy lists no file routes', async () => {
+    expect((await get('/files/photos/facebook/123/1', 'ag-bar')).status).toBe(403);
+    expect(seen).toBeNull();
+  });
+
+  it('refuses a path that would climb out of the route, and any write', async () => {
+    // URL parsing already resolves a literal `..`, so it never reaches a route...
+    expect((await get('/files/photos/../admin')).status).toBe(404);
+    // ...while an encoded separator does, and the path check refuses it.
+    expect((await get('/files/photos/a%2F..%2Fadmin')).status).toBe(400);
+    expect((await get('/files/photos/.hidden')).status).toBe(400);
+    expect((await get('/files/photos/facebook/1', 'ag-butler', { method: 'POST', body: 'x' })).status).toBe(405);
+    expect(seen).toBeNull();
+  });
+
+  it('refuses a body of a type the route does not carry', async () => {
+    reply = () => new Response('<html>', { headers: { 'content-type': 'text/html' } });
+    expect((await get('/files/photos/facebook/123/1')).status).toBe(502);
+  });
+
+  it('refuses a body over the size limit, declared or not', async () => {
+    reply = () =>
+      new Response(new Uint8Array(20), { headers: { 'content-type': 'image/png', 'content-length': '20' } });
+    expect((await get('/files/photos/facebook/123/1')).status).toBe(502);
+    reply = () => {
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(6));
+          controller.enqueue(new Uint8Array(6));
+          controller.close();
+        },
+      });
+      return new Response(stream, { headers: { 'content-type': 'image/png' } });
+    };
+    expect((await get('/files/photos/facebook/123/1')).status).toBe(502);
+  });
+
+  it('passes a missing file through as not found', async () => {
+    reply = () => new Response('gone', { status: 404 });
+    expect((await get('/files/photos/facebook/123/9')).status).toBe(404);
   });
 });

@@ -90,8 +90,14 @@ Edit `data/custom-gateway/config/gateway.json`:
 - **`mcpServers`** — a remote `url` with optional `auth`, or a `builtin`
   (`google-drive`, `google-calendar`, `google-tasks`, `google-gmail`) with
   `{"kind":"oauth2","profile":"<name>"}`. Drive includes Sheets.
-- **`agents`** — per agent group id, the model aliases and MCP servers it may
-  use; `*` is the fallback for groups without an entry.
+- **`fileRoutes`** — read-only routes for files an agent saves to disk (a
+  listing's photo), so the bytes reach the file without passing through the
+  model: `{"url": "http://host:port/photos", "contentTypes": ["image/"],
+  "maxBytes": 10000000}`. The agent reads `$NANOCLAW_GATEWAY_URL/files/<name>/<path>`
+  with GET or HEAD; only the listed content types and sizes come back, plain
+  path segments only, and none of the agent's headers are forwarded.
+- **`agents`** — per agent group id, the model aliases, MCP servers and file
+  routes (`files`) it may use; `*` is the fallback for groups without an entry.
 
 Put values in `secrets.env`. For a provider's own setup (`/add-opencode` and
 others), the credential prompt stores the key under the `auth.secret` of the
